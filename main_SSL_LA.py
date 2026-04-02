@@ -22,6 +22,7 @@ __author__ = "Hemlata Tak"
 __email__ = "tak@eurecom.fr"
 
 
+@torch.no_grad()
 def evaluate_accuracy(dev_loader, model, device):
     val_loss = 0.0
     num_total = 0.0
@@ -44,6 +45,7 @@ def evaluate_accuracy(dev_loader, model, device):
     return val_loss
 
 
+@torch.no_grad()
 def produce_evaluation_file(dataset, model, device, save_path):
     data_loader = DataLoader(dataset, batch_size=10, shuffle=False, drop_last=False)
     num_correct = 0.0
@@ -154,6 +156,12 @@ if __name__ == "__main__":
         default="./models",
         help="Directory in Google Drive to securely save state dictionaries",
     )  ######### Added
+    parser.add_argument(
+        "--logs_dir",
+        type=str,
+        default="./logs",
+        help="Directory in Google Drive to securely save TensorBoard telemetry",
+    )  ########## Added
 
     # Hyperparameters
     parser.add_argument("--batch_size", type=int, default=14)
@@ -473,9 +481,15 @@ if __name__ == "__main__":
     )
     del dev_set, d_label_dev
 
-    # Training and validation
+    ########## Edited the Logging Destination to Be on the Persistent Shared Drive ##########
+    # Training and validation 
     num_epochs = args.num_epochs
-    writer = SummaryWriter("logs/{}".format(model_tag))
+    
+    # Securely route telemetry to the persistent Shared Drive workspace
+    secure_log_path = os.path.join(args.logs_dir, model_tag)
+    os.makedirs(secure_log_path, exist_ok=True)
+    writer = SummaryWriter(secure_log_path)
+    ########## End of Edited Logging Destination Block ##########
 
     for epoch in range(
         start_epoch, num_epochs
@@ -486,29 +500,43 @@ if __name__ == "__main__":
         writer.add_scalar("val_loss", val_loss, epoch)
         writer.add_scalar("loss", running_loss, epoch)
         print("\n{} - {} - {} ".format(epoch, running_loss, val_loss))
-        
+
         ########## Added Full State Checkpoint Block ##########
         # Create the robust payload
         checkpoint_payload = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'best_val_loss': best_val_loss,
-            'torch_rng_state': torch.get_rng_state(),
-            'cuda_rng_state': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            'np_rng_state': np.random.get_state(),
-            'random_rng_state': random.getstate(),
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_val_loss": best_val_loss,
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state": (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            ),
+            "np_rng_state": np.random.get_state(),
+            "random_rng_state": random.getstate(),
         }
-        
+
         # Ensure the directory exists
         os.makedirs(args.checkpoint_dir, exist_ok=True)
-        
+
         # Save the primary checkpoint
-        checkpoint_path = os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth')
+        checkpoint_path = os.path.join(
+            args.checkpoint_dir, f"checkpoint_epoch_{epoch}.pth"
+        )
         torch.save(checkpoint_payload, checkpoint_path)
         print(f"Epoch {epoch} Full State Checkpoint secured at: {checkpoint_path}")
-        
+
         # Optional: Save a rolling 'latest' file to make scripting easier
-        latest_path = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pth')
+        latest_path = os.path.join(args.checkpoint_dir, "checkpoint_latest.pth")
         torch.save(checkpoint_payload, latest_path)
+        
+        ########## Added Best Model Tracker ##########
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            # Route the best artifact to the persistent Google Drive checkpoint directory
+            best_artifact_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
+            # Save only the state_dict for the final evaluation phase
+            torch.save(model.state_dict(), best_artifact_path)
+            print(f"*** New Best Model (Loss: {best_val_loss:.4f}) recorded and secured at: {best_artifact_path} ***")
+        ########## End of Best Model Tracker Block ##########
         ########## End of Full State Checkpoint Block ##########
