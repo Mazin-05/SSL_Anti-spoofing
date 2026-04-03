@@ -16,6 +16,7 @@ from data_utils_SSL import (
 from model import Model
 from tensorboardX import SummaryWriter
 from core_scripts.startup_config import set_random_seed
+from tqdm import tqdm
 
 
 __author__ = "Hemlata Tak"
@@ -29,7 +30,7 @@ def evaluate_accuracy(dev_loader, model, device):
     model.eval()
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
-    for batch_x, batch_y in dev_loader:
+    for batch_x, batch_y in tqdm(dev_loader, desc="Validation Batches", leave=False):
 
         batch_size = batch_x.size(0)
         num_total += batch_size
@@ -87,7 +88,7 @@ def train_epoch(train_loader, model, lr, optim, device):
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
 
-    for batch_x, batch_y in train_loader:
+    for batch_x, batch_y in tqdm(train_loader, desc="Training Batches", leave=False):
 
         batch_size = batch_x.size(0)
         num_total += batch_size
