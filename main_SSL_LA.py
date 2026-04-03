@@ -46,8 +46,8 @@ def evaluate_accuracy(dev_loader, model, device):
 
 
 @torch.no_grad()
-def produce_evaluation_file(dataset, model, device, save_path):
-    data_loader = DataLoader(dataset, batch_size=10, shuffle=False, drop_last=False)
+def produce_evaluation_file(dataset, model, device, save_path, args):
+    data_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, drop_last=False)
     num_correct = 0.0
     num_total = 0.0
     model.eval()
@@ -144,6 +144,12 @@ if __name__ == "__main__":
   
     """
     # Model saving and resumption options
+    parser.add_argument(
+        "--pretrained_path",
+        type=str,
+        default="/content/pretrained_models/xlsr2_300m.pt",
+        help="Path to the fairseq wav2vec 2.0 weights",
+    )  ########## Added
     parser.add_argument(
         "--resume",
         type=str,
@@ -417,7 +423,7 @@ if __name__ == "__main__":
                 args.database_path + "ASVspoof2021_{}_eval/".format(args.track)
             ),
         )
-        produce_evaluation_file(eval_set, model, device, args.eval_output)
+        produce_evaluation_file(eval_set, model, device, args.eval_output, args)
         sys.exit(0)
 
     # define train dataloader
@@ -446,7 +452,7 @@ if __name__ == "__main__":
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
-        num_workers=8,
+        num_workers=2,
         shuffle=True,
         drop_last=True,
     )
@@ -477,14 +483,14 @@ if __name__ == "__main__":
         algo=args.algo,
     )
     dev_loader = DataLoader(
-        dev_set, batch_size=args.batch_size, num_workers=8, shuffle=False
+        dev_set, batch_size=args.batch_size, num_workers=2, shuffle=False
     )
     del dev_set, d_label_dev
 
     ########## Edited the Logging Destination to Be on the Persistent Shared Drive ##########
-    # Training and validation 
+    # Training and validation
     num_epochs = args.num_epochs
-    
+
     # Securely route telemetry to the persistent Shared Drive workspace
     secure_log_path = os.path.join(args.logs_dir, model_tag)
     os.makedirs(secure_log_path, exist_ok=True)
@@ -529,14 +535,16 @@ if __name__ == "__main__":
         # Optional: Save a rolling 'latest' file to make scripting easier
         latest_path = os.path.join(args.checkpoint_dir, "checkpoint_latest.pth")
         torch.save(checkpoint_payload, latest_path)
-        
+
         ########## Added Best Model Tracker ##########
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             # Route the best artifact to the persistent Google Drive checkpoint directory
-            best_artifact_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
+            best_artifact_path = os.path.join(args.checkpoint_dir, "best_model.pth")
             # Save only the state_dict for the final evaluation phase
             torch.save(model.state_dict(), best_artifact_path)
-            print(f"*** New Best Model (Loss: {best_val_loss:.4f}) recorded and secured at: {best_artifact_path} ***")
+            print(
+                f"*** New Best Model (Loss: {best_val_loss:.4f}) recorded and secured at: {best_artifact_path} ***"
+            )
         ########## End of Best Model Tracker Block ##########
         ########## End of Full State Checkpoint Block ##########

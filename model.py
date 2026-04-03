@@ -18,10 +18,10 @@ __email__ = "tak@eurecom.fr"
 
 
 class SSLModel(nn.Module):
-    def __init__(self,device):
+    def __init__(self, device, cp_path):
         super(SSLModel, self).__init__()
         
-        cp_path = 'xlsr2_300m.pt'   # Change the pre-trained XLSR model path. 
+        # Now dynamically accepting the path staged in Phase 2
         model, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([cp_path])
         self.model = model[0]
         self.device=device
@@ -444,7 +444,7 @@ class Model(nn.Module):
         ####
         # create network wav2vec 2.0
         ####
-        self.ssl_model = SSLModel(self.device)
+        self.ssl_model = SSLModel(self.device, args.pretrained_path)
         self.LL = nn.Linear(self.ssl_model.out_dim, 128)
 
         self.first_bn = nn.BatchNorm2d(num_features=1)
