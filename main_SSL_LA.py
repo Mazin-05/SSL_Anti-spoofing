@@ -17,6 +17,7 @@ from model import Model
 from tensorboardX import SummaryWriter
 from core_scripts.startup_config import set_random_seed
 from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler
 
 
 __author__ = "Hemlata Tak"
@@ -76,38 +77,45 @@ def produce_evaluation_file(dataset, model, device, save_path, args):
         fh.close()
     print("Scores saved to {}".format(save_path))
 
-
-def train_epoch(train_loader, model, lr, optim, device):
+########## Updated the train_epoch function to include AMP ##########
+def train_epoch(train_loader, model, lr, optimizer, device, scaler):
     running_loss = 0
-
     num_total = 0.0
-
+    
     model.train()
 
     # set objective (Loss) functions
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
-
+    
     for batch_x, batch_y in tqdm(train_loader, desc="Training Batches", leave=False):
-
         batch_size = batch_x.size(0)
         num_total += batch_size
-
+        
         batch_x = batch_x.to(device)
         batch_y = batch_y.view(-1).type(torch.int64).to(device)
-        batch_out = model(batch_x)
-
-        batch_loss = criterion(batch_out, batch_y)
-
-        running_loss += batch_loss.item() * batch_size
-
-        optim.zero_grad()
-        batch_loss.backward()
-        optim.step()
-
+        
+        optimizer.zero_grad()
+        
+        # 1. Cast the forward pass to FP16
+        with autocast():
+            batch_out = model(batch_x)
+            batch_loss = criterion(batch_out, batch_y)
+        
+        # 2. Scale the loss and run backward pass
+        scaler.scale(batch_loss).backward()
+        
+        # 3. Unscale gradients and step optimizer
+        scaler.step(optimizer)
+        
+        # 4. Update the scale for next iteration
+        scaler.update()
+        
+        running_loss += (batch_loss.item() * batch_size)
+        
     running_loss /= num_total
-
     return running_loss
+########## End of Updated train_epoch function with AMP ##########
 
 
 if __name__ == "__main__":
@@ -367,6 +375,8 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    # Initialize the AMP GradScaler
+    scaler = GradScaler() ########## Added
 
     ########## Added Initialization and Resumption Block ##########
     # Default starting values for a fresh run
@@ -386,7 +396,12 @@ if __name__ == "__main__":
             # 2. Restore computational graph and momentum buffers
             model.load_state_dict(checkpoint["model_state_dict"])
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
+            
+            # Restore AMP Scaling state if it exists
+            ########## Added
+            if 'scaler_state_dict' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                
             # 3. Restore deterministic data shuffling variables
             torch.set_rng_state(checkpoint["torch_rng_state"])
             if torch.cuda.is_available() and checkpoint["cuda_rng_state"] is not None:
@@ -502,7 +517,7 @@ if __name__ == "__main__":
         start_epoch, num_epochs
     ):  ######### Adjusted to start from the correct epoch in case of resumption
 
-        running_loss = train_epoch(train_loader, model, args.lr, optimizer, device)
+        running_loss = train_epoch(train_loader, model, args.lr, optimizer, device, scaler)
         val_loss = evaluate_accuracy(dev_loader, model, device)
         writer.add_scalar("val_loss", val_loss, epoch)
         writer.add_scalar("loss", running_loss, epoch)
@@ -514,6 +529,7 @@ if __name__ == "__main__":
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict(), ########## Added AMP State
             "best_val_loss": best_val_loss,
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_state": (
