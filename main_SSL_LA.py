@@ -387,7 +387,7 @@ if __name__ == "__main__":
     if args.resume:
         if os.path.isfile(args.resume):
             print(f"=> Loading Full State Checkpoint from '{args.resume}'...")
-            checkpoint = torch.load(args.resume, map_location=device)
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
 
             # 1. Restore iterator and metrics
             start_epoch = checkpoint["epoch"] + 1
@@ -471,6 +471,7 @@ if __name__ == "__main__":
         num_workers=2,
         shuffle=True,
         drop_last=True,
+        pin_memory=True
     )
 
     del train_set, d_label_trn
@@ -499,7 +500,7 @@ if __name__ == "__main__":
         algo=args.algo,
     )
     dev_loader = DataLoader(
-        dev_set, batch_size=args.batch_size, num_workers=2, shuffle=False
+        dev_set, batch_size=args.batch_size, num_workers=2, shuffle=False, pin_memory=True
     )
     del dev_set, d_label_dev
 
