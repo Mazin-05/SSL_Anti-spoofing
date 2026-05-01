@@ -28,7 +28,7 @@ def genSpoof_list_ASV5(dir_meta, is_train=False, is_eval=False):
         if not line:
             continue
             
-        cols = line.split('\t')
+        cols = line.split()
         
         # ASVspoof 5 full ground truth contains at least 9 columns
         if len(cols) >= 9:
