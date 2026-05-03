@@ -503,10 +503,17 @@ if __name__ == "__main__":
             if 'scaler_state_dict' in checkpoint:
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 
-            # 3. Restore deterministic data shuffling variables
-            torch.set_rng_state(checkpoint["torch_rng_state"])
+            # 3. Restore deterministic data shuffling variables (With PyTorch 2.6 ByteTensor strictness fix)
+            try:
+                torch.set_rng_state(checkpoint["torch_rng_state"].cpu().byte())
+            except Exception as e:
+                print(f"[-] Minor Warning: Bypassing CPU RNG state: {e}")
             if torch.cuda.is_available() and checkpoint["cuda_rng_state"] is not None:
-                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+                try:
+                    cuda_states = [s.cpu().byte() if hasattr(s, 'cpu') else s for s in checkpoint["cuda_rng_state"]]
+                    torch.cuda.set_rng_state_all(cuda_states)
+                except Exception as e:
+                    print(f"[-] Minor Warning: Bypassing CUDA RNG state: {e}")        
             np.random.set_state(checkpoint["np_rng_state"])
             random.setstate(checkpoint["random_rng_state"])
 
