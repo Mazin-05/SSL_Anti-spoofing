@@ -52,14 +52,33 @@ def calculate_advanced_metrics(y_true, y_pred):
     return acc, f1
 
 def compute_minDCF(y_true, y_score, P_spoof=0.05, C_miss=1, C_fa=10):
-    """Calculates the minimum Normalized Detection Cost Function (minDCF) for ASVspoof 5 Track 1."""
+    """
+    Exact ASVspoof 5 Normalized minimum Detection Cost Function (minDCF).
+    - P_spoof: Prior probability of a spoofing attack (0.05 for ASVspoof 5 Track 1)
+    - C_miss: Cost of false rejecting a bonafide target (1)
+    - C_fa: Cost of false accepting a spoof (10)
+    """
     if len(np.unique(y_true)) < 2:
         return 0.0
+
     fpr, tpr, thresholds = roc_curve(y_true, y_score, pos_label=1)
-    fnr = 1 - tpr
-    beta = (C_miss / C_fa) * ((1 - P_spoof) / P_spoof)
-    dcf = fnr + beta * fpr
-    return np.min(dcf)
+    
+    # 1. Error Rates
+    P_miss = 1 - tpr # False Negative Rate (Missing a bonafide)
+    P_fa = fpr       # False Positive Rate (Accepting a spoof)
+    P_bona = 1 - P_spoof
+
+    # 2. Calculate raw DCF for all possible operating thresholds
+    dcf = (C_miss * P_bona * P_miss) + (C_fa * P_spoof * P_fa)
+
+    # 3. Calculate the Default DCF 
+    # (The cost if the system just naively predicted everything as the same class)
+    default_dcf = min(C_miss * P_bona, C_fa * P_spoof)
+
+    # 4. Normalize the lowest possible DCF against the default cost
+    min_dcf = np.min(dcf) / default_dcf
+
+    return min_dcf
 # ==========================================
 
 @torch.no_grad()
@@ -603,6 +622,17 @@ if __name__ == "__main__":
         writer.add_scalar("Loss/Val", val_loss, epoch)
         writer.add_scalar("Metrics/Val_EER", val_eer, epoch)
         writer.add_scalar("Metrics/Val_minDCF", val_dcf, epoch)
+        
+        # --- NEW: Append Results to CSV ---
+        csv_path = os.path.join(args.logs_dir, "training_metrics.csv")
+        file_exists = os.path.isfile(csv_path)
+        with open(csv_path, "a") as f:
+            # Write headers if the file is brand new
+            if not file_exists:
+                f.write("Epoch,Train_Loss,Val_Loss,Val_EER,Val_minDCF,Val_Acc,Val_F1\n")
+            # Append the epoch metrics
+            f.write(f"{epoch},{trn_loss:.6f},{val_loss:.6f},{val_eer:.4f},{val_dcf:.6f},{val_acc:.4f},{val_f1:.4f}\n")
+        # ----------------------------------
         
         # Live Terminal Dashboard
         print("\n" + "="*60)
