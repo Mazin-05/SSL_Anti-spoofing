@@ -23,6 +23,54 @@ from torch.cuda.amp import autocast, GradScaler
 __author__ = "Hemlata Tak"
 __email__ = "tak@eurecom.fr"
 
+from sklearn.metrics import accuracy_score, f1_score
+import eval_metric_LA as em
+
+# ==========================================
+# METRIC ENGINE (t-DCF, EER, Acc, F1)
+# ==========================================
+def calculate_metrics(y_true, y_score, y_pred):
+    y_true = np.array(y_true)
+    y_score = np.array(y_score)
+    y_pred = np.array(y_pred)
+    
+    # Split scores based on true labels
+    bonafide_scores = y_score[y_true == 1]
+    spoof_scores = y_score[y_true == 0]
+    
+    # Prevent crash if a batch somehow only has one class
+    if len(bonafide_scores) == 0 or len(spoof_scores) == 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    # 1. EER
+    eer, _ = em.compute_eer(bonafide_scores, spoof_scores)
+    eer = eer * 100
+
+    # 2. Accuracy & F1
+    acc = accuracy_score(y_true, y_pred) * 100
+    f1 = f1_score(y_true, y_pred, pos_label=1, zero_division=0) * 100
+
+    # 3. min t-DCF (ASVspoof 2019/2021 LA Default Parameters)
+    cost_model = {
+        'Ptar': 0.0099, 'Pnon': 0.0099, 'Pspoof': 0.9802,
+        'Cmiss_asv': 1, 'Cfa_asv': 10, 'Cmiss_cm': 1, 'Cfa_cm': 10,
+    }
+    
+    # Note: Precise t-DCF evaluation requires reading ASV scores from a file. 
+    # For in-memory training monitoring, we use standard generic ASV error rates (e.g., EER ~ 2.48%).
+    Pfa_asv = 0.0248
+    Pmiss_asv = 0.0248
+    Pmiss_spoof_asv = 0.0248
+
+    tDCF_norm, _ = em.compute_tDCF_legacy(
+        bonafide_scores, spoof_scores, 
+        Pfa_asv, Pmiss_asv, Pmiss_spoof_asv, 
+        cost_model, print_cost=False
+    )
+    min_tDCF = np.min(tDCF_norm)
+
+    return eer, acc, f1, min_tDCF
+# ==========================================
 
 @torch.no_grad()
 def evaluate_accuracy(dev_loader, model, device):
@@ -31,20 +79,31 @@ def evaluate_accuracy(dev_loader, model, device):
     model.eval()
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
+    
+    y_true_all, y_score_all, y_pred_all = [], [], []
+    
     for batch_x, batch_y in tqdm(dev_loader, desc="Validation Batches", leave=False):
-
         batch_size = batch_x.size(0)
         num_total += batch_size
         batch_x = batch_x.to(device)
         batch_y = batch_y.view(-1).type(torch.int64).to(device)
+        
         batch_out = model(batch_x)
-
         batch_loss = criterion(batch_out, batch_y)
         val_loss += batch_loss.item() * batch_size
+        
+        # Metric Tracking
+        probs = torch.nn.functional.softmax(batch_out, dim=1)[:, 1].detach().cpu().numpy()
+        preds = torch.argmax(batch_out, dim=1).detach().cpu().numpy()
+        
+        y_true_all.extend(batch_y.cpu().numpy())
+        y_score_all.extend(probs)
+        y_pred_all.extend(preds)
 
     val_loss /= num_total
+    eer, acc, f1, min_tDCF = calculate_metrics(y_true_all, y_score_all, y_pred_all)
 
-    return val_loss
+    return val_loss, eer, acc, f1, min_tDCF
 
 
 @torch.no_grad()
@@ -77,16 +136,16 @@ def produce_evaluation_file(dataset, model, device, save_path, args):
         fh.close()
     print("Scores saved to {}".format(save_path))
 
-########## Updated the train_epoch function to include AMP ##########
+########## Updated the train_epoch function to include AMP & Metrics ##########
 def train_epoch(train_loader, model, lr, optimizer, device, scaler):
     running_loss = 0
     num_total = 0.0
-    
     model.train()
-
-    # set objective (Loss) functions
+    
     weight = torch.FloatTensor([0.1, 0.9]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weight)
+    
+    y_true_all, y_score_all, y_pred_all = [], [], []
     
     for batch_x, batch_y in tqdm(train_loader, desc="Training Batches", leave=False):
         batch_size = batch_x.size(0)
@@ -97,25 +156,34 @@ def train_epoch(train_loader, model, lr, optimizer, device, scaler):
         
         optimizer.zero_grad()
         
-        # 1. Cast the forward pass to FP16
         with autocast():
             batch_out = model(batch_x)
             batch_loss = criterion(batch_out, batch_y)
         
-        # 2. Scale the loss and run backward pass
         scaler.scale(batch_loss).backward()
         
-        # 3. Unscale gradients and step optimizer
-        scaler.step(optimizer)
+        # Explicit Gradient Clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         
-        # 4. Update the scale for next iteration
+        scaler.step(optimizer)
         scaler.update()
         
         running_loss += (batch_loss.item() * batch_size)
         
+        # Metric Tracking
+        probs = torch.nn.functional.softmax(batch_out, dim=1)[:, 1].detach().cpu().numpy()
+        preds = torch.argmax(batch_out, dim=1).detach().cpu().numpy()
+        
+        y_true_all.extend(batch_y.cpu().numpy())
+        y_score_all.extend(probs)
+        y_pred_all.extend(preds)
+        
     running_loss /= num_total
-    return running_loss
-########## End of Updated train_epoch function with AMP ##########
+    eer, acc, f1, min_tDCF = calculate_metrics(y_true_all, y_score_all, y_pred_all)
+    
+    return running_loss, eer, acc, f1, min_tDCF
+########## End of Updated train_epoch function ##########
 
 
 if __name__ == "__main__":
@@ -402,10 +470,17 @@ if __name__ == "__main__":
             if 'scaler_state_dict' in checkpoint:
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
                 
-            # 3. Restore deterministic data shuffling variables
-            torch.set_rng_state(checkpoint["torch_rng_state"])
+            # 3. Restore deterministic data shuffling variables (With PyTorch 2.6 ByteTensor strictness fix)
+            try:
+                torch.set_rng_state(checkpoint["torch_rng_state"].cpu().byte())
+            except Exception as e:
+                print(f"[-] Minor Warning: Bypassing CPU RNG state: {e}")      
             if torch.cuda.is_available() and checkpoint["cuda_rng_state"] is not None:
-                torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+                try:
+                    cuda_states = [s.cpu().byte() if hasattr(s, 'cpu') else s for s in checkpoint["cuda_rng_state"]]
+                    torch.cuda.set_rng_state_all(cuda_states)
+                except Exception as e:
+                    print(f"[-] Minor Warning: Bypassing CUDA RNG state: {e}")
             np.random.set_state(checkpoint["np_rng_state"])
             random.setstate(checkpoint["random_rng_state"])
 
@@ -514,15 +589,38 @@ if __name__ == "__main__":
     writer = SummaryWriter(secure_log_path)
     ########## End of Edited Logging Destination Block ##########
 
-    for epoch in range(
-        start_epoch, num_epochs
-    ):  ######### Adjusted to start from the correct epoch in case of resumption
+    for epoch in range(start_epoch, num_epochs):
 
-        running_loss = train_epoch(train_loader, model, args.lr, optimizer, device, scaler)
-        val_loss = evaluate_accuracy(dev_loader, model, device)
-        writer.add_scalar("val_loss", val_loss, epoch)
-        writer.add_scalar("loss", running_loss, epoch)
-        print("\n{} - {} - {} ".format(epoch, running_loss, val_loss))
+        trn_loss, trn_eer, trn_acc, trn_f1, trn_tdcf = train_epoch(train_loader, model, args.lr, optimizer, device, scaler)
+        val_loss, val_eer, val_acc, val_f1, val_tdcf = evaluate_accuracy(dev_loader, model, device)
+        
+        # Tensorboard Logging
+        writer.add_scalar("Loss/Train", trn_loss, epoch)
+        writer.add_scalar("Metrics/Train_EER", trn_eer, epoch)
+        writer.add_scalar("Metrics/Train_min_tDCF", trn_tdcf, epoch)
+        
+        writer.add_scalar("Loss/Val", val_loss, epoch)
+        writer.add_scalar("Metrics/Val_EER", val_eer, epoch)
+        writer.add_scalar("Metrics/Val_min_tDCF", val_tdcf, epoch)
+
+        # CSV Logging
+        csv_path = os.path.join(args.logs_dir, "training_metrics.csv")
+        file_exists = os.path.isfile(csv_path)
+        with open(csv_path, "a") as f:
+            if not file_exists:
+                # NEW: Added Training Metric Headers
+                f.write("Epoch,Train_Loss,Train_EER,Train_min_tDCF,Train_Acc,Train_F1,Val_Loss,Val_EER,Val_min_tDCF,Val_Acc,Val_F1\n")
+            
+            # NEW: Added Training Metric Variables
+            f.write(f"{epoch},{trn_loss:.6f},{trn_eer:.4f},{trn_tdcf:.6f},{trn_acc:.4f},{trn_f1:.4f},{val_loss:.6f},{val_eer:.4f},{val_tdcf:.6f},{val_acc:.4f},{val_f1:.4f}\n")
+
+        # Live Terminal Dashboard
+        print("\n" + "="*60)
+        print(f" EPOCH {epoch} SUMMARY")
+        print("="*60)
+        print(f" [TRAIN] Loss: {trn_loss:.4f} | EER: {trn_eer:.2f}% | min t-DCF: {trn_tdcf:.4f} | Acc: {trn_acc:.2f}% | F1: {trn_f1:.2f}%")
+        print(f" [VALID] Loss: {val_loss:.4f} | EER: {val_eer:.2f}% | min t-DCF: {val_tdcf:.4f} | Acc: {val_acc:.2f}% | F1: {val_f1:.2f}%")
+        print("="*60 + "\n")
 
         ########## Added Full State Checkpoint Block ##########
         # Create the robust payload
